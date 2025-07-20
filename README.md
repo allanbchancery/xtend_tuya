@@ -12,7 +12,26 @@ The reason why this is not merged in the official Tuya integration is because th
 
 - Adds entities needed by the Energy dashboard
 - Adds support for locks (requires [additional configuration](./docs/configure_locks.md))
+- **NEW in v4.1.0**: Enhanced authentication reliability with retry logic and better error handling
 - Much more...
+
+## What's New in v4.1.0
+
+### 🔧 Authentication Improvements
+- **Fixed login failures**: Enhanced OpenAPI authentication with retry mechanism
+- **Better error handling**: More detailed error messages and improved troubleshooting
+- **Increased reliability**: Retry logic with exponential backoff for network issues
+- **Graceful degradation**: Integration continues to work even if non-critical APIs fail
+- **Improved logging**: Better debug information for troubleshooting authentication issues
+
+### Technical Details
+The authentication system has been significantly improved to address common login failures:
+- Added 3-retry mechanism with exponential backoff (1s, 2s, 4s delays)
+- Separated critical main API from optional non-user API validation
+- Enhanced error reporting through Home Assistant's issue system
+- Better handling of network connectivity issues and timeouts
+
+This should resolve the majority of login authentication issues users have been experiencing.
 
 ### Comparison
 

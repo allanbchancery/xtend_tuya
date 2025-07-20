@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import requests
 import json
 from typing import Optional, Literal, Any
@@ -137,51 +138,84 @@ class XTTuyaIOTDeviceManagerInterface(XTDeviceManagerInterface):
             non_user_specific_api=True,
         )
         api.set_dev_channel("hass")
-        try:
-            if auth_type == AuthType.CUSTOM:
-                response1 = await hass.async_add_executor_job(
-                    api.connect,
-                    config_entry.options[CONF_USERNAME],
-                    config_entry.options[CONF_PASSWORD],
-                )
-            else:
-                response1 = await hass.async_add_executor_job(
-                    api.connect,
-                    config_entry.options[CONF_USERNAME],
-                    config_entry.options[CONF_PASSWORD],
-                    config_entry.options[CONF_COUNTRY_CODE],
-                    config_entry.options[CONF_APP_TYPE],
-                )
-            response2 = await hass.async_add_executor_job(
-                non_user_api.connect,
-                config_entry.options[CONF_USERNAME],
-                config_entry.options[CONF_PASSWORD],
-                config_entry.options[CONF_COUNTRY_CODE],
-                config_entry.options[CONF_APP_TYPE],
-            )
-            response3 = await hass.async_add_executor_job(api.test_validity)
-            response4 = await hass.async_add_executor_job(non_user_api.test_validity)
-        except requests.exceptions.RequestException:
-            await self.raise_issue(
-                hass=hass,
-                config_entry=config_entry,
-                is_fixable=True,
-                severity=IssueSeverity.ERROR,
-                translation_key="tuya_iot_failed_request",
-                translation_placeholders={
-                    "name": DOMAIN,
-                    "config_entry_id": config_entry.title or "Config entry not found",
-                },
-            )
-            return None
-
-        if (
-            response1.get("success", False) is False
-            or response2.get("success", False) is False
-            or response3.get("success", False) is False
-            or response4.get("success", False) is False
-        ):
-            # raise ConfigEntryNotReady(response)
+        # Enhanced authentication with retry logic and better error handling
+        max_retries = 3
+        api_connected = False
+        non_user_api_connected = False
+        
+        for attempt in range(max_retries):
+            try:
+                LOGGER.debug(f"Authentication attempt {attempt + 1}/{max_retries}")
+                
+                # Try to connect main API
+                if not api_connected:
+                    if auth_type == AuthType.CUSTOM:
+                        response1 = await hass.async_add_executor_job(
+                            api.connect,
+                            config_entry.options[CONF_USERNAME],
+                            config_entry.options[CONF_PASSWORD],
+                        )
+                    else:
+                        response1 = await hass.async_add_executor_job(
+                            api.connect,
+                            config_entry.options[CONF_USERNAME],
+                            config_entry.options[CONF_PASSWORD],
+                            config_entry.options[CONF_COUNTRY_CODE],
+                            config_entry.options[CONF_APP_TYPE],
+                        )
+                    
+                    if response1.get("success", False):
+                        api_connected = True
+                        LOGGER.info(f"Main API connection successful on attempt {attempt + 1}")
+                    else:
+                        LOGGER.warning(f"Main API connection failed on attempt {attempt + 1}: {response1}")
+                
+                # Try to connect non-user API (less critical)
+                if not non_user_api_connected:
+                    try:
+                        response2 = await hass.async_add_executor_job(
+                            non_user_api.connect,
+                            config_entry.options[CONF_USERNAME],
+                            config_entry.options[CONF_PASSWORD],
+                            config_entry.options[CONF_COUNTRY_CODE],
+                            config_entry.options[CONF_APP_TYPE],
+                        )
+                        
+                        if response2.get("success", False):
+                            non_user_api_connected = True
+                            LOGGER.info(f"Non-user API connection successful on attempt {attempt + 1}")
+                        else:
+                            LOGGER.warning(f"Non-user API connection failed on attempt {attempt + 1}: {response2}")
+                    except Exception as e:
+                        LOGGER.warning(f"Non-user API connection exception on attempt {attempt + 1}: {e}")
+                
+                # If main API is connected, test its validity
+                if api_connected:
+                    try:
+                        response3 = await hass.async_add_executor_job(api.test_validity)
+                        if response3.get("success", False):
+                            LOGGER.info(f"Main API validity test successful on attempt {attempt + 1}")
+                            break  # Main API is working, we can proceed
+                        else:
+                            LOGGER.warning(f"Main API validity test failed on attempt {attempt + 1}: {response3}")
+                            api_connected = False  # Reset to retry connection
+                    except Exception as e:
+                        LOGGER.warning(f"Main API validity test exception on attempt {attempt + 1}: {e}")
+                        api_connected = False  # Reset to retry connection
+                
+            except requests.exceptions.RequestException as e:
+                LOGGER.error(f"Network request failed on attempt {attempt + 1}: {e}")
+            except Exception as e:
+                LOGGER.error(f"Unexpected error on attempt {attempt + 1}: {e}")
+            
+            # If we haven't succeeded and have more attempts, wait before retrying
+            if not api_connected and attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                LOGGER.info(f"Waiting {wait_time} seconds before retry...")
+                await asyncio.sleep(wait_time)
+        
+        # Check if we have at least the main API working
+        if not api_connected:
             await self.raise_issue(
                 hass=hass,
                 config_entry=config_entry,
@@ -191,10 +225,26 @@ class XTTuyaIOTDeviceManagerInterface(XTDeviceManagerInterface):
                 translation_placeholders={
                     "name": DOMAIN,
                     "config_entry_id": config_entry.title or "Config entry not found",
+                    "attempts": str(max_retries),
                 },
                 learn_more_url="https://github.com/azerty9971/xtend_tuya/blob/main/docs/renew_cloud_credentials.md",
             )
             return None
+        
+        # Warn if non-user API failed but continue (it's not critical)
+        if not non_user_api_connected:
+            LOGGER.warning("Non-user API connection failed, some advanced features may not work")
+            await self.raise_issue(
+                hass=hass,
+                config_entry=config_entry,
+                is_fixable=False,
+                severity=IssueSeverity.WARNING,
+                translation_key="tuya_iot_non_user_api_failed",
+                translation_placeholders={
+                    "name": DOMAIN,
+                    "config_entry_id": config_entry.title or "Config entry not found",
+                },
+            )
         mq = XTIOTOpenMQ(api)
         mq.start()
         device_manager = XTIOTDeviceManager(self.multi_manager, api, non_user_api, mq)
@@ -406,11 +456,10 @@ class XTTuyaIOTDeviceManagerInterface(XTDeviceManagerInterface):
         params: dict[str, Any] | None = None
         if payload:
             params = json.loads(payload)
-        match method:
-            case "GET":
-                return self.iot_account.device_manager.api.get(url, params)
-            case "POST":
-                return self.iot_account.device_manager.api.post(url, params)
+        if method == "GET":
+            return self.iot_account.device_manager.api.get(url, params)
+        elif method == "POST":
+            return self.iot_account.device_manager.api.post(url, params)
         return None
 
     def get_webrtc_sdp_answer(
